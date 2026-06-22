@@ -9,6 +9,7 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const ROBLOX_COOKIE = process.env.ROBLOX_COOKIE;
 const PLACE_ID = '97598239454123';
 const MAX_PLAYERS = 2;
+const MIN_UPTIME_HOURS = 4; // only post servers running 4+ hours
 const CHECK_INTERVAL_MS = 30 * 1000; // every 30 seconds
 // ============================================
 
@@ -21,6 +22,7 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 const DATA_FILE = './setup_data.json';
 let setupData = {};
+let lastPostedServerId = null;
 
 function loadData() {
   if (fs.existsSync(DATA_FILE)) {
@@ -30,6 +32,12 @@ function loadData() {
 
 function saveData() {
   fs.writeFileSync(DATA_FILE, JSON.stringify(setupData, null, 2));
+}
+
+function formatUptime(seconds) {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  return `${h}h ${m}m`;
 }
 
 function fetchRobloxServers() {
@@ -69,37 +77,69 @@ async function checkAndPostServers() {
     const data = await fetchRobloxServers();
     if (!data || !data.data) return;
 
-    const lowServers = data.data.filter(server =>
-      server.playing <= MAX_PLAYERS && server.playing >= 1
+    // Filter: 1-2 players AND running for 4+ hours
+    const minUptimeSeconds = MIN_UPTIME_HOURS * 3600;
+    const goodServers = data.data.filter(server =>
+      server.playing <= MAX_PLAYERS &&
+      server.playing >= 1 &&
+      server.fps !== undefined &&
+      typeof server.pingData !== 'undefined' ||
+      (server.playing <= MAX_PLAYERS && server.playing >= 1 && (server.maxPlayers - server.playing) >= (server.maxPlayers - MAX_PLAYERS))
     );
 
-    if (lowServers.length === 0) {
-      console.log('No low player servers found this check.');
+    // Use uptime from server if available, otherwise filter by low players only
+    const filteredServers = data.data.filter(server => {
+      const hasLowPlayers = server.playing >= 1 && server.playing <= MAX_PLAYERS;
+      // Roblox API doesn't always expose uptime directly,
+      // so we check if 'age' or uptime-like field exists
+      const uptime = server.age || server.uptime || null;
+      if (uptime !== null) {
+        return hasLowPlayers && uptime >= minUptimeSeconds;
+      }
+      // If no uptime field, just use low player filter
+      return hasLowPlayers;
+    });
+
+    if (filteredServers.length === 0) {
+      console.log('No matching servers found this check.');
       return;
     }
 
-    console.log(`Found ${lowServers.length} low player server(s)!`);
+    // Pick the first server, skip if same as last posted
+    const server = filteredServers[0];
+    if (server.id === lastPostedServerId) {
+      console.log('Same server as last post, skipping.');
+      return;
+    }
+
+    lastPostedServerId = server.id;
+    console.log(`✅ Found a good server! Players: ${server.playing}`);
+
+    const joinLink = `https://www.roblox.com/games/start?placeId=${PLACE_ID}&gameInstanceId=${server.id}`;
+    const uptime = server.age || server.uptime || null;
+    const uptimeText = uptime ? formatUptime(uptime) : 'Unknown';
 
     for (const [guildId, channelId] of Object.entries(setupData)) {
       const channel = await client.channels.fetch(channelId).catch(() => null);
-      if (!channel) continue;
-
-      for (const server of lowServers) {
-        const joinLink = `https://www.roblox.com/games/start?placeId=${PLACE_ID}&gameInstanceId=${server.id}`;
-
-        const embed = new EmbedBuilder()
-          .setTitle('🌱 Low Player Server Found!')
-          .setColor(0x57F287)
-          .setDescription(`A server with only **${server.playing}** player(s) was found in Grow a Garden 2!`)
-          .addFields(
-            { name: '👥 Players', value: `${server.playing} / ${server.maxPlayers}`, inline: true },
-            { name: '🔗 Join Link', value: `[Click to Join](${joinLink})`, inline: true }
-          )
-          .setFooter({ text: 'Grow a Garden 2 Server Finder' })
-          .setTimestamp();
-
-        await channel.send({ embeds: [embed] });
+      if (!channel) {
+        console.log(`Could not find channel ${channelId} for guild ${guildId}`);
+        continue;
       }
+
+      const embed = new EmbedBuilder()
+        .setTitle('🌱 Low Player Server Found!')
+        .setColor(0x57F287)
+        .setDescription(`A server with only **${server.playing}** player(s) was found in Grow a Garden 2!`)
+        .addFields(
+          { name: '👥 Players', value: `${server.playing} / ${server.maxPlayers}`, inline: true },
+          { name: '⏱️ Server Uptime', value: uptimeText, inline: true },
+          { name: '🔗 Join Link', value: `[Click to Join Now!](${joinLink})`, inline: false }
+        )
+        .setFooter({ text: 'Grow a Garden 2 Server Finder • Checks every 30 seconds' })
+        .setTimestamp();
+
+      await channel.send({ embeds: [embed] });
+      console.log(`✅ Posted to channel ${channelId}`);
     }
   } catch (err) {
     console.error('Error checking servers:', err.message);
@@ -135,7 +175,7 @@ client.once('ready', async () => {
   console.log('✅ Slash commands registered!');
 
   setInterval(checkAndPostServers, CHECK_INTERVAL_MS);
-  console.log(`✅ Auto-checking every ${CHECK_INTERVAL_MS / 60000} minutes.`);
+  console.log(`✅ Auto-checking every ${CHECK_INTERVAL_MS / 1000} seconds.`);
 });
 
 client.on('interactionCreate', async (interaction) => {
@@ -147,7 +187,7 @@ client.on('interactionCreate', async (interaction) => {
     saveData();
 
     await interaction.reply({
-      content: `✅ Done! Low player server alerts will be sent to ${channel} automatically every 5 minutes.`,
+      content: `✅ Done! Low player server alerts will be sent to ${channel} automatically every 30 seconds.`,
       ephemeral: true
     });
 
