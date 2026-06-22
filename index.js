@@ -1,5 +1,6 @@
-const { Client, GatewayIntentBits, SlashCommandBuilder, PermissionFlagsBits, ChannelType, EmbedBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, SlashCommandBuilder, PermissionFlagsBits, ChannelType, EmbedBuilder, MessageFlags } = require('discord.js');
 const https = require('https');
+const http = require('http');
 const fs = require('fs');
 
 // ============================================
@@ -9,14 +10,23 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const ROBLOX_COOKIE = process.env.ROBLOX_COOKIE;
 const PLACE_ID = '97598239454123';
 const MAX_PLAYERS = 2;
-const MIN_UPTIME_HOURS = 4; // only post servers running 4+ hours
-const CHECK_INTERVAL_MS = 30 * 1000; // every 30 seconds
+const MIN_UPTIME_HOURS = 4;
+const CHECK_INTERVAL_MS = 30 * 1000;
 // ============================================
 
 if (!BOT_TOKEN || !ROBLOX_COOKIE) {
-  console.error('❌ ERROR: BOT_TOKEN or ROBLOX_COOKIE is missing from environment variables!');
+  console.error('❌ ERROR: BOT_TOKEN or ROBLOX_COOKIE is missing!');
   process.exit(1);
 }
+
+// Keep-alive HTTP server so Railway doesn't kill the process
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+  res.writeHead(200);
+  res.end('Bot is running!');
+}).listen(PORT, () => {
+  console.log(`✅ Keep-alive server running on port ${PORT}`);
+});
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
@@ -26,7 +36,11 @@ let lastPostedServerId = null;
 
 function loadData() {
   if (fs.existsSync(DATA_FILE)) {
-    setupData = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+    try {
+      setupData = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+    } catch (e) {
+      setupData = {};
+    }
   }
 }
 
@@ -57,8 +71,7 @@ function fetchRobloxServers() {
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
         try {
-          const parsed = JSON.parse(data);
-          resolve(parsed);
+          resolve(JSON.parse(data));
         } catch (e) {
           reject(e);
         }
@@ -77,26 +90,14 @@ async function checkAndPostServers() {
     const data = await fetchRobloxServers();
     if (!data || !data.data) return;
 
-    // Filter: 1-2 players AND running for 4+ hours
     const minUptimeSeconds = MIN_UPTIME_HOURS * 3600;
-    const goodServers = data.data.filter(server =>
-      server.playing <= MAX_PLAYERS &&
-      server.playing >= 1 &&
-      server.fps !== undefined &&
-      typeof server.pingData !== 'undefined' ||
-      (server.playing <= MAX_PLAYERS && server.playing >= 1 && (server.maxPlayers - server.playing) >= (server.maxPlayers - MAX_PLAYERS))
-    );
 
-    // Use uptime from server if available, otherwise filter by low players only
     const filteredServers = data.data.filter(server => {
       const hasLowPlayers = server.playing >= 1 && server.playing <= MAX_PLAYERS;
-      // Roblox API doesn't always expose uptime directly,
-      // so we check if 'age' or uptime-like field exists
       const uptime = server.age || server.uptime || null;
       if (uptime !== null) {
         return hasLowPlayers && uptime >= minUptimeSeconds;
       }
-      // If no uptime field, just use low player filter
       return hasLowPlayers;
     });
 
@@ -105,7 +106,6 @@ async function checkAndPostServers() {
       return;
     }
 
-    // Pick the first server, skip if same as last posted
     const server = filteredServers[0];
     if (server.id === lastPostedServerId) {
       console.log('Same server as last post, skipping.');
@@ -122,7 +122,7 @@ async function checkAndPostServers() {
     for (const [guildId, channelId] of Object.entries(setupData)) {
       const channel = await client.channels.fetch(channelId).catch(() => null);
       if (!channel) {
-        console.log(`Could not find channel ${channelId} for guild ${guildId}`);
+        console.log(`Could not find channel ${channelId}`);
         continue;
       }
 
@@ -188,7 +188,7 @@ client.on('interactionCreate', async (interaction) => {
 
     await interaction.reply({
       content: `✅ Done! Low player server alerts will be sent to ${channel} automatically every 30 seconds.`,
-      ephemeral: true
+      flags: MessageFlags.Ephemeral
     });
 
     console.log(`Setup done for guild ${interaction.guildId} → channel ${channel.id}`);
@@ -199,16 +199,30 @@ client.on('interactionCreate', async (interaction) => {
     if (setupData[interaction.guildId]) {
       delete setupData[interaction.guildId];
       saveData();
-      await interaction.reply({ content: '🛑 Stopped sending server alerts.', ephemeral: true });
+      await interaction.reply({
+        content: '🛑 Stopped sending server alerts.',
+        flags: MessageFlags.Ephemeral
+      });
     } else {
-      await interaction.reply({ content: '⚠️ No alert channel was set up yet.', ephemeral: true });
+      await interaction.reply({
+        content: '⚠️ No alert channel was set up yet.',
+        flags: MessageFlags.Ephemeral
+      });
     }
   }
 
   if (interaction.commandName === 'check') {
-    await interaction.reply({ content: '🔍 Checking for low player servers now...', ephemeral: true });
+    await interaction.reply({
+      content: '🔍 Checking for low player servers now...',
+      flags: MessageFlags.Ephemeral
+    });
     checkAndPostServers();
   }
+});
+
+// Handle unexpected errors so bot doesn't crash
+process.on('unhandledRejection', (error) => {
+  console.error('Unhandled rejection:', error.message);
 });
 
 client.login(BOT_TOKEN);
