@@ -9,7 +9,7 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const ROBLOX_COOKIE = process.env.ROBLOX_COOKIE;
 const PLACE_ID = '97598239454123';
 const MAX_PLAYERS = 2;
-const CHECK_INTERVAL_MS = 5 * 60 * 1000; // every 5 minutes
+const CHECK_INTERVAL_MS = 30 * 1000; // every 30 seconds
 // ============================================
 
 if (!BOT_TOKEN || !ROBLOX_COOKIE) {
